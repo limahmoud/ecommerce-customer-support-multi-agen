@@ -2,9 +2,8 @@
 import os
 
 from dotenv import load_dotenv
-
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
+from langchain_ollama import ChatOllama
+from langchain_core.messages import SystemMessage
 
 from langgraph.graph import StateGraph, START, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -15,15 +14,16 @@ from tools.order_tools import (
     get_products_in_order,
 )
 
-
-# 1. Load environment variables
 load_dotenv()
 
-if not os.getenv("GOOGLE_API_KEY"):
-    raise ValueError("GOOGLE_API_KEY is missing from .env")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
+
+if not OLLAMA_MODEL or not OLLAMA_BASE_URL:
+    raise ValueError("OLLAMA_MODEL or OLLAMA_BASE_URL is missing from .env")
 
 
-# 2. Define Order Agent tools
+# 1. Tools
 order_tools = [
     get_orders_for_customer,
     get_order_information,
@@ -31,35 +31,73 @@ order_tools = [
 ]
 
 
-# 3. Initialize Gemini
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.8-flash",
+# 2. LLM
+llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
     temperature=0,
 )
 
-
-# 4. Bind tools to the LLM
 llm_with_tools = llm.bind_tools(order_tools)
 
 
-# 5. Agent node
+# 3. System Prompt
+order_system_message = SystemMessage(
+    content="""
+    You are an Order Support Agent.
+
+    You handle:
+    - Customer orders
+    - Order details
+    - Products inside orders
+
+    Rules:
+    1. Always use tools to retrieve order information.
+    2. Never invent order IDs or customer IDs.
+    3. Use exact IDs from conversation history.
+    4. If an order ID is missing, ask for it.
+    5. Use get_order_information for order details.
+    6. Use get_products_in_order for products inside an order.
+    7. Use get_orders_for_customer for a customer's orders.
+    8. Never invent database information.
+    9. Wait for actual tool results before answering.
+    10. Answer clearly and concisely.
+
+    Conversation:
+    Resolve references such as:
+    - it
+    - that order
+    - this order
+    - the previous order
+
+    Use the previous messages to identify the correct order ID.
+    Do not ask for an ID that is already available.
+    """
+)
+
+
+# 4. Agent Node
 def order_agent_node(state: MessagesState):
-    response = llm_with_tools.invoke(state["messages"])
 
-    return {
-        "messages": [response]
-    }
+    messages = [
+        order_system_message,
+        *state["messages"]
+    ]
+
+    response = llm_with_tools.invoke(messages)
+
+    # print("\n[ORDER AGENT DEBUG]")
+    # print("Tool calls:", response.tool_calls)
+    # print("Content:", response.content)
+
+    return {"messages": [response]}
 
 
-# 6. Build LangGraph workflow
+# 5. Build Graph
 builder = StateGraph(MessagesState)
 
 builder.add_node("order_agent", order_agent_node)
-
-builder.add_node(
-    "tools",
-    ToolNode(order_tools)
-)
+builder.add_node("tools", ToolNode(order_tools))
 
 builder.add_edge(START, "order_agent")
 
@@ -71,23 +109,5 @@ builder.add_conditional_edges(
 builder.add_edge("tools", "order_agent")
 
 
-# 7. Compile the agent
+# 6. Compile
 order_agent = builder.compile()
-
-
-# 8. Run a simple test
-if __name__ == "__main__":
-
-    question = "Show me the details of order number 1."
-
-    result = order_agent.invoke({
-        "messages": [
-            HumanMessage(content=question)
-        ]
-    })
-
-    print("\n========== ORDER AGENT RESPONSE ==========\n")
-
-    last_message = result["messages"][-1]
-
-    print(last_message.content)

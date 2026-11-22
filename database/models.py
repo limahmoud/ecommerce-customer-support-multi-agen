@@ -1,6 +1,7 @@
 
 from datetime import datetime
 from decimal import Decimal
+import uuid
 
 from sqlalchemy import (
     String,
@@ -8,7 +9,9 @@ from sqlalchemy import (
     ForeignKey,
     Numeric,
     Integer,
-    Text
+    Text,
+    Uuid
+
 )
 
 from sqlalchemy.orm import (
@@ -62,6 +65,10 @@ class Customer(Base):
     support_tickets: Mapped[list["SupportTicket"]] = relationship(
         back_populates="customer"
     )
+    conversations: Mapped[list["Conversation"]] = relationship(
+    back_populates="customer",
+    cascade="all, delete-orphan"
+   )
 
 
 # =====================================
@@ -265,4 +272,51 @@ class SupportTicket(Base):
 
     order: Mapped["Order | None"] = relationship(
         back_populates="support_tickets"
+    )
+# =====================================
+# 7. CONVERSATIONS
+# =====================================
+
+class Conversation(Base):
+
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customers.id"),
+        index=True,
+        nullable=False
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(200),
+        default="New Conversation",
+        nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    last_opened_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    last_message_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    customer: Mapped["Customer"] = relationship(
+        back_populates="conversations"
     )
