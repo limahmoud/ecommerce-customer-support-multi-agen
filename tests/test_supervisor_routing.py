@@ -46,7 +46,8 @@ def test_supervisor_routes_order_and_shipping():
                     HumanMessage(
                         content="Show me the details of order 1"
                     )
-                ]
+                ],
+                "customer_id": 1,
             },
             config=config,
         )
@@ -70,7 +71,8 @@ def test_supervisor_routes_order_and_shipping():
                     HumanMessage(
                         content="What is its shipment status?"
                     )
-                ]
+                ],
+                "customer_id": 1,
             },
             config=config,
         )

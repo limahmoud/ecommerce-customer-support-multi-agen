@@ -1,12 +1,12 @@
+from agents.error_handling import invoke_llm_safely, TOOL_ERROR_MESSAGE
 
 import os
 import re
 from uuid import uuid4
 from typing import Annotated
 
-from dotenv import load_dotenv
 
-from langchain_ollama import ChatOllama
+from agents.llm_factory import create_chat_model
 from langchain_core.tools import tool
 from langchain_core.messages import (
     HumanMessage,
@@ -14,7 +14,8 @@ from langchain_core.messages import (
     SystemMessage,
 )
 
-from langgraph.graph import StateGraph, START, MessagesState
+from langgraph.graph import StateGraph, START
+from graph.state import SupportState
 from langgraph.prebuilt import (
     ToolNode,
     tools_condition,
@@ -33,20 +34,15 @@ from database.operations import (
     update_order_status,
     create_return,
     update_refund_status,
+    request_refund,
 )
 
+from graph.state import SupportState
+
 # 1. Load Environment Variables
-load_dotenv()
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
-
-if not OLLAMA_MODEL or not OLLAMA_BASE_URL:
-    raise ValueError("OLLAMA_MODEL or OLLAMA_BASE_URL is missing from .env")
-
 
 # 2. Prepare Conversation History for Specialist Agents
-def prepare_agent_messages(state: MessagesState, question: str):
+def prepare_agent_messages(state: SupportState, question: str):
 
     conversation_history = []
 
@@ -76,14 +72,15 @@ def prepare_agent_messages(state: MessagesState, question: str):
 @tool
 def ask_customer_agent(
     question: str,
-    state: Annotated[MessagesState, InjectedState],
+    state: Annotated[SupportState, InjectedState],
 ) -> str:
     """Use for customer information, customer email, customer ID, and support tickets."""
 
     messages = prepare_agent_messages(state, question)
 
     result = customer_agent.invoke({
-        "messages": messages
+    "messages": messages,
+    "customer_id": state["customer_id"],
     })
 
     return str(result["messages"][-1].content)
@@ -92,14 +89,15 @@ def ask_customer_agent(
 @tool
 def ask_order_agent(
     question: str,
-    state: Annotated[MessagesState, InjectedState],
+    state: Annotated[SupportState, InjectedState],
 ) -> str:
     """Use for customer orders, order details, and products inside orders."""
 
     messages = prepare_agent_messages(state, question)
 
     result = order_agent.invoke({
-        "messages": messages
+    "messages": messages,
+    "customer_id": state["customer_id"],
     })
 
     return str(result["messages"][-1].content)
@@ -108,27 +106,29 @@ def ask_order_agent(
 @tool
 def ask_shipping_agent(
     question: str,
-    state: Annotated[MessagesState, InjectedState],
+    state: Annotated[SupportState, InjectedState],
 ) -> str:
     """Use for shipment information, tracking numbers, delivery status, and estimated delivery."""
 
     messages = prepare_agent_messages(state, question)
 
     result = shipping_agent.invoke({
-        "messages": messages
+    "messages": messages,
+    "customer_id": state["customer_id"],
     })
 
     return str(result["messages"][-1].content)
 
 
 @tool
-def ask_returns_agent(question: str,state: Annotated[MessagesState, InjectedState],) -> str:
+def ask_returns_agent(question: str,state: Annotated[SupportState, InjectedState],) -> str:
     """Use for product returns, return IDs, return status, and return information."""
 
     messages = prepare_agent_messages(state, question)
 
     result = returns_agent.invoke({
-        "messages": messages
+    "messages": messages,
+    "customer_id": state["customer_id"],
     })
 
     return str(result["messages"][-1].content)
@@ -136,6 +136,7 @@ def ask_returns_agent(question: str,state: Annotated[MessagesState, InjectedStat
 
 @tool
 def request_sensitive_action(
+    state: Annotated[SupportState, InjectedState],
     action: Literal["refund", "cancel_order", "create_return"],
     details: str,
     reason: str,
@@ -145,10 +146,10 @@ def request_sensitive_action(
     """
     Request human approval before executing a sensitive action.
 
-    cancel_order: requires order_id.
-    create_return: requires order_id.
-    refund: requires return_id.
+    Customer ID is injected from the authenticated graph state.
     """
+
+    customer_id = state["customer_id"]
 
     # 1. Validate IDs.
     if action in ("cancel_order", "create_return"):
@@ -161,7 +162,17 @@ def request_sensitive_action(
         if return_id is None or order_id is not None:
             return "Invalid IDs: refund requires return_id only."
 
-    # 2. Request human approval.
+    # 2. Submit refund request before asking for human approval.
+    if action == "refund":
+        try:
+            request_refund(
+                return_id=return_id,
+                customer_id=customer_id,
+            )
+        except (ValueError, PermissionError) as error:
+            return f"Refund request could not be submitted: {error}"
+
+    # 3. Request human approval.
     approval_data = {
         "action": action,
         "order_id": order_id,
@@ -172,16 +183,32 @@ def request_sensitive_action(
 
     decision = interrupt(approval_data)
 
-    # 3. Stop if rejected.
-    if not decision.get("approved", False):
+    approved = decision.get("approved", False)
+
+    # Preserve the existing rejection behavior for other actions.
+    if not approved and action != "refund":
         return (
             f"Action rejected. "
             f"Reason: {decision.get('reason', 'Not provided')}"
         )
 
-    # 4. Execute only after approval.
-    # Prototype role: will be replaced with authenticated identity.
-    actor_role = "support_agent"
+        # Reviewer identity comes from the authenticated API.
+    actor_role = decision.get("actor_role")
+    actor_user_id = decision.get("actor_user_id")
+    actor_email = decision.get("actor_email")
+
+    allowed_roles = {
+        "cancel_order": {"support_agent", "admin"},
+        "create_return": {"support_agent", "admin"},
+        "refund": {"returns_agent", "admin"},
+    }
+
+    if (
+        not actor_role
+        or actor_role not in allowed_roles[action]
+        or not actor_user_id
+    ):
+        return "Approval rejected: reviewer is not authorized."
 
     try:
 
@@ -191,6 +218,9 @@ def request_sensitive_action(
                 order_id=order_id,
                 new_status="cancelled",
                 actor_role=actor_role,
+                customer_id=customer_id,
+                actor_user_id=actor_user_id,
+                actor_email=actor_email,
             )
 
         elif action == "create_return":
@@ -199,32 +229,38 @@ def request_sensitive_action(
                 order_id=order_id,
                 reason=reason,
                 actor_role=actor_role,
+                customer_id=customer_id,
+                actor_user_id=actor_user_id,
+                actor_email=actor_email,
             )
 
         elif action == "refund":
 
             result = update_refund_status(
                 return_id=return_id,
-                new_refund_status="pending",
+                new_refund_status="processing" if approved else "rejected",
                 actor_role=actor_role,
+                customer_id=customer_id,
+                actor_user_id=actor_user_id,
+                actor_email=actor_email,
+            )
+
+        if not approved:
+            return (
+                "Refund request rejected. "
+                f"Reason: {decision.get('reason', 'Not provided')}. "
+                f"Result: {result}"
             )
 
         return (
-            f"Action approved and executed successfully. "
+            "Action approved and executed successfully. "
             f"Result: {result}"
         )
 
-    except ValueError as error:
+    except (ValueError, PermissionError) as error:
 
         return (
-            f"Action was approved but could not be executed: {error}"
-        )
-
-    except Exception:
-
-        return (
-            "Action was approved but execution failed "
-            "because of an internal database error."
+            f"Action could not be executed: {error}"
         )
 
 
@@ -241,11 +277,7 @@ supervisor_tools = [
 
 
 # 5. Initialize LLM
-llm = ChatOllama(
-    model=OLLAMA_MODEL,
-    base_url=OLLAMA_BASE_URL,
-    temperature=0,
-)
+llm = create_chat_model()
 
 llm_with_tools = llm.bind_tools(supervisor_tools)
 
@@ -353,7 +385,7 @@ SPECIALIST ROUTING RULES:
 )
 
 
-def detect_sensitive_action(state: MessagesState):
+def detect_sensitive_action(state: SupportState):
 
     messages = state["messages"]
 
@@ -361,26 +393,46 @@ def detect_sensitive_action(state: MessagesState):
     if not messages or not isinstance(messages[-1], HumanMessage):
         return None
 
-    question = str(messages[-1].content)
+    question = str(messages[-1].content).strip()
 
-    # Detect sensitive action.
+    # Detect explicit action intent, not ordinary status inquiries.
     patterns = {
-        "cancel_order": r"\b(cancel|cancellation|cancelling|canceling)\b",
-        "create_return": r"\b(return|returning)\b",
-        "refund": r"\b(refund|refunding|reimburse)\b",
+        "refund": [
+            r"\brequest\s+(?:a\s+)?refund\b",
+            r"\b(?:process|initiate|claim)\s+(?:a\s+)?refund\b",
+            r"\b(?:i want|i need|i'd like)\s+(?:to get\s+)?(?:a\s+)?refund\b",
+            r"\bget\s+my money back\b",
+            r"\brefund\s+(?:for|on)\s+return\s*#?\s*\d+\b",
+        ],
+        "cancel_order": [
+            r"\b(?:please\s+)?cancel\s+(?:my\s+)?order\b",
+            r"\b(?:i want|i need|i'd like)\s+to cancel\b",
+            r"\b(?:can|could)\s+you\s+cancel\b",
+            r"\bcancel\s+(?:it|this order|that order)\b",
+        ],
+        "create_return": [
+            r"\b(?:create|open|start|submit|request|initiate)\s+(?:a\s+)?(?:product\s+)?return\b",
+            r"\b(?:i want|i need|i'd like)\s+to return\b",
+            r"\b(?:please|can you|could you)\s+return\b",
+            r"\breturn\s+(?:my\s+)?order\s*#?\s*\d+\b",
+            r"\bsend\s+(?:this|that|the|my)?\s*(?:product|item|order)\s+back\b",
+        ],
     }
 
     action = None
 
-    for action_name, pattern in patterns.items():
-        if re.search(pattern, question, re.IGNORECASE):
+    for action_name, action_patterns in patterns.items():
+        if any(
+            re.search(pattern, question, re.IGNORECASE)
+            for pattern in action_patterns
+        ):
             action = action_name
             break
 
     if action is None:
         return None
 
-    # Find the required ID in the current message.
+    # Refund requires a return ID.
     if action == "refund":
         id_pattern = r"\breturn\s*#?\s*(\d+)\b"
     else:
@@ -392,10 +444,9 @@ def detect_sensitive_action(state: MessagesState):
         re.IGNORECASE,
     )
 
-    # Search previous customer messages if needed.
+    # Search previous customer messages for the relevant ID.
     if not id_match:
         for message in reversed(messages[:-1]):
-
             if isinstance(message, HumanMessage):
                 id_match = re.search(
                     id_pattern,
@@ -410,25 +461,31 @@ def detect_sensitive_action(state: MessagesState):
 
         if action == "refund":
             return AIMessage(
-                content="Which return would you like to request a refund for? Please provide the return ID."
+                content=(
+                    "Which return would you like to request a refund for? "
+                    "Please provide the return ID."
+                )
             )
 
         return AIMessage(
-            content="Which order are you referring to? Please provide the order ID."
+            content=(
+                "Which order are you referring to? "
+                "Please provide the order ID."
+            )
         )
 
     entity_id = int(id_match.group(1))
 
-    
-    # Prepare approval request.
     args = {
         "action": action,
         "order_id": (
-            entity_id if action in ("cancel_order", "create_return")
+            entity_id
+            if action in ("cancel_order", "create_return")
             else None
         ),
         "return_id": (
-            entity_id if action == "refund"
+            entity_id
+            if action == "refund"
             else None
         ),
         "details": f"Customer requested {action}.",
@@ -450,7 +507,7 @@ def detect_sensitive_action(state: MessagesState):
 
 
 # 7. Supervisor Node
-def supervisor_node(state: MessagesState):
+def supervisor_node(state: SupportState):
 
     # 1. Check for mandatory sensitive actions.
     sensitive_action = detect_sensitive_action(state)
@@ -467,7 +524,7 @@ def supervisor_node(state: MessagesState):
         *state["messages"]
     ]
 
-    response = llm_with_tools.invoke(messages)
+    response = invoke_llm_safely(llm_with_tools, messages)
 
     return {
         "messages": [response]
@@ -475,10 +532,10 @@ def supervisor_node(state: MessagesState):
 
 
 # 8. Build Graph
-builder = StateGraph(MessagesState)
+builder = StateGraph(SupportState)
 
 builder.add_node("supervisor", supervisor_node)
-builder.add_node("tools", ToolNode(supervisor_tools))
+builder.add_node("tools", ToolNode(supervisor_tools, handle_tool_errors=TOOL_ERROR_MESSAGE))
 
 builder.add_edge(START, "supervisor")
 

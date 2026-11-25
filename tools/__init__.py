@@ -1,7 +1,6 @@
 
 from tools.customer_tools import (
-    find_customer_by_id,
-    find_customer_by_email,
+    get_my_profile,
     get_customer_support_tickets,
 )
 
@@ -22,10 +21,9 @@ from tools.returns_tools import (
 )
 
 
-# All 10 read-only tools
+# All 9 read-only tools
 ALL_TOOLS = [
-    find_customer_by_id,
-    find_customer_by_email,
+    get_my_profile,
     get_customer_support_tickets,
 
     get_orders_for_customer,

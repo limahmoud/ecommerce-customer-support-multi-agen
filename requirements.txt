@@ -77,3 +77,11 @@ watchdog==7.1.0
 websockets==17.4
 xxhash==4.1.0
 zstandard==0.25.0
+pwdlib[argon2]==0.4.2
+PyJWT==2.15.1
+email-validator
+langchain-groq==1.2.1
+groq==1.7.0
+langchain-ollama==1.1.0
+ollama==0.6.3
+langgraph-checkpoint-postgres==3.2.1

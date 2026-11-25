@@ -34,12 +34,13 @@ def get_customer_by_id(customer_id: int):
         }
 
 
-def get_customer_by_email(email: str):
+def get_customer_by_email(email: str, customer_id: int):
 
     with SessionLocal() as db:
 
         statement = select(Customer).where(
-            Customer.email == email
+            Customer.id == customer_id,
+            Customer.email == email,
         )
 
         customer = db.scalar(statement)
@@ -53,7 +54,6 @@ def get_customer_by_email(email: str):
             "email": customer.email,
             "phone": customer.phone,
         }
-
 
 # ==========================================
 # 2. ORDER QUERIES
@@ -97,13 +97,14 @@ def get_customer_orders(customer_id: int):
         return result
 
 
-def get_order_details(order_id: int):
-
+def get_order_details(order_id: int, customer_id: int):
     with SessionLocal() as db:
-
         statement = (
             select(Order)
-            .where(Order.id == order_id)
+            .where(
+                Order.id == order_id,
+                Order.customer_id == customer_id,
+            )
             .options(
                 selectinload(Order.customer),
                 selectinload(Order.items),
@@ -119,33 +120,35 @@ def get_order_details(order_id: int):
 
         return {
             "order_id": order.id,
-            "status": order.status,
+            "customer_id": order.customer_id,
+            "customer_name": order.customer.name,
             "order_date": order.order_date.isoformat(),
+            "status": order.status,
             "total_amount": float(order.total_amount),
-
-            "customer": {
-                "id": order.customer.id,
-                "name": order.customer.name,
-                "email": order.customer.email,
-            },
 
             "items": [
                 {
+                    "id": item.id,
                     "product_name": item.product_name,
                     "quantity": item.quantity,
                     "unit_price": float(item.unit_price),
+                    "subtotal": float(
+                        item.unit_price * item.quantity
+                    ),
                 }
                 for item in order.items
             ],
 
             "shipments": [
                 {
+                    "shipment_id": shipment.id,
                     "tracking_number": shipment.tracking_number,
                     "carrier": shipment.carrier,
                     "status": shipment.status,
                     "estimated_delivery": (
                         shipment.estimated_delivery.isoformat()
-                        if shipment.estimated_delivery else None
+                        if shipment.estimated_delivery
+                        else None
                     ),
                 }
                 for shipment in order.shipments
@@ -157,22 +160,29 @@ def get_order_details(order_id: int):
                     "reason": returned.reason,
                     "status": returned.status,
                     "refund_status": returned.refund_status,
+                    "created_at": returned.created_at.isoformat(),
                 }
                 for returned in order.returns
             ],
         }
 
 
+
 # ==========================================
 # 3. ORDER ITEM QUERIES
 # ==========================================
 
-def get_order_items(order_id: int):
+def get_order_items(order_id: int, customer_id: int):
 
     with SessionLocal() as db:
 
-        statement = select(OrderItem).where(
-            OrderItem.order_id == order_id
+        statement = (
+            select(OrderItem)
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(
+                OrderItem.order_id == order_id,
+                Order.customer_id == customer_id,
+            )
         )
 
         items = db.scalars(statement).all()
@@ -188,18 +198,21 @@ def get_order_items(order_id: int):
             for item in items
         ]
 
-
 # ==========================================
 # 4. SHIPPING QUERIES
 # ==========================================
 
-def get_order_shipments(order_id: int):
+def get_order_shipments(order_id: int, customer_id: int):
 
     with SessionLocal() as db:
 
         statement = (
             select(Shipment)
-            .where(Shipment.order_id == order_id)
+            .join(Order, Order.id == Shipment.order_id)
+            .where(
+                Shipment.order_id == order_id,
+                Order.customer_id == customer_id,
+            )
             .order_by(Shipment.id)
         )
 
@@ -221,13 +234,20 @@ def get_order_shipments(order_id: int):
         ]
 
 
-def get_shipment_by_tracking_number(tracking_number: str):
+def get_shipment_by_tracking_number(
+    tracking_number: str,
+    customer_id: int,
+):
 
     with SessionLocal() as db:
 
         statement = (
             select(Shipment)
-            .where(Shipment.tracking_number == tracking_number)
+            .join(Order, Order.id == Shipment.order_id)
+            .where(
+                Shipment.tracking_number == tracking_number,
+                Order.customer_id == customer_id,
+            )
         )
 
         shipment = db.scalar(statement)
@@ -247,18 +267,21 @@ def get_shipment_by_tracking_number(tracking_number: str):
             ),
         }
 
-
 # ==========================================
 # 5. RETURNS QUERIES
 # ==========================================
 
-def get_order_returns(order_id: int):
+def get_order_returns(order_id: int, customer_id: int):
 
     with SessionLocal() as db:
 
         statement = (
             select(Return)
-            .where(Return.order_id == order_id)
+            .join(Order, Order.id == Return.order_id)
+            .where(
+                Return.order_id == order_id,
+                Order.customer_id == customer_id,
+            )
             .order_by(Return.id)
         )
 
@@ -277,11 +300,18 @@ def get_order_returns(order_id: int):
         ]
 
 
-def get_return_by_id(return_id: int):
-
+def get_return_by_id(return_id: int, customer_id: int):
     with SessionLocal() as db:
+        statement = (
+            select(Return)
+            .join(Order, Order.id == Return.order_id)
+            .where(
+                Return.id == return_id,
+                Order.customer_id == customer_id,
+            )
+        )
 
-        returned = db.get(Return, return_id)
+        returned = db.scalar(statement)
 
         if not returned:
             return None
@@ -292,9 +322,67 @@ def get_return_by_id(return_id: int):
             "reason": returned.reason,
             "status": returned.status,
             "refund_status": returned.refund_status,
-            "created_at": returned.created_at.isoformat(),
+            "created_at": (
+                returned.created_at.isoformat()
+                if returned.created_at
+                else None
+            ),
         }
 
+def get_customer_returns(customer_id: int):
+
+    with SessionLocal() as db:
+
+        statement = (
+            select(Return)
+            .join(Order, Order.id == Return.order_id)
+            .where(Order.customer_id == customer_id)
+            .order_by(Return.created_at.desc())
+        )
+
+        returns = db.scalars(statement).all()
+
+        return [
+            {
+                "return_id": returned.id,
+                "order_id": returned.order_id,
+                "reason": returned.reason,
+                "status": returned.status,
+                "refund_status": returned.refund_status,
+                "created_at": (
+                    returned.created_at.isoformat()
+                    if returned.created_at else None
+                ),
+            }
+            for returned in returns
+        ]
+
+
+def get_all_returns():
+
+    with SessionLocal() as db:
+
+        statement = (
+            select(Return)
+            .order_by(Return.created_at.desc())
+        )
+
+        returns = db.scalars(statement).all()
+
+        return [
+            {
+                "return_id": returned.id,
+                "order_id": returned.order_id,
+                "reason": returned.reason,
+                "status": returned.status,
+                "refund_status": returned.refund_status,
+                "created_at": (
+                    returned.created_at.isoformat()
+                    if returned.created_at else None
+                ),
+            }
+            for returned in returns
+        ]
 
 # ==========================================
 # 6. SUPPORT TICKET QUERIES

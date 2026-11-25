@@ -1,5 +1,7 @@
+from typing import Annotated
 
 from langchain.tools import tool
+from langgraph.prebuilt import InjectedState
 
 from database.queries import (
     get_customer_orders,
@@ -9,18 +11,26 @@ from database.queries import (
 
 
 @tool
-def get_orders_for_customer(customer_id: int):
-    """Get all orders belonging to a specific customer, including their items."""
+def get_orders_for_customer(
+    customer_id: Annotated[int, InjectedState("customer_id")],
+):
+    """Get orders belonging only to the authenticated customer."""
     return get_customer_orders(customer_id)
 
 
 @tool
-def get_order_information(order_id: int):
-    """Get complete details of an order, including customer, items, shipments, and returns."""
-    return get_order_details(order_id)
+def get_order_information(
+    order_id: int,
+    customer_id: Annotated[int, InjectedState("customer_id")],
+):
+    """Get order details only if the order belongs to the authenticated customer."""
+    return get_order_details(order_id, customer_id)
 
 
 @tool
-def get_products_in_order(order_id: int):
-    """Get the products, quantities, unit prices, and subtotals inside an order."""
-    return get_order_items(order_id)
+def get_products_in_order(
+    order_id: int,
+    customer_id: Annotated[int, InjectedState("customer_id")],
+):
+    """Get products only from an order belonging to the authenticated customer."""
+    return get_order_items(order_id, customer_id)

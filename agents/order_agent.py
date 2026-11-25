@@ -1,11 +1,12 @@
+from agents.error_handling import invoke_llm_safely, TOOL_ERROR_MESSAGE
 
 import os
 
-from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
+from agents.llm_factory import create_chat_model
 from langchain_core.messages import SystemMessage
 
-from langgraph.graph import StateGraph, START, MessagesState
+from langgraph.graph import StateGraph, START
+from graph.state import SupportState
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools.order_tools import (
@@ -13,14 +14,6 @@ from tools.order_tools import (
     get_order_information,
     get_products_in_order,
 )
-
-load_dotenv()
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
-
-if not OLLAMA_MODEL or not OLLAMA_BASE_URL:
-    raise ValueError("OLLAMA_MODEL or OLLAMA_BASE_URL is missing from .env")
 
 
 # 1. Tools
@@ -32,11 +25,7 @@ order_tools = [
 
 
 # 2. LLM
-llm = ChatOllama(
-    model=OLLAMA_MODEL,
-    base_url=OLLAMA_BASE_URL,
-    temperature=0,
-)
+llm = create_chat_model()
 
 llm_with_tools = llm.bind_tools(order_tools)
 
@@ -77,14 +66,14 @@ order_system_message = SystemMessage(
 
 
 # 4. Agent Node
-def order_agent_node(state: MessagesState):
+def order_agent_node(state: SupportState):
 
     messages = [
         order_system_message,
         *state["messages"]
     ]
 
-    response = llm_with_tools.invoke(messages)
+    response = invoke_llm_safely(llm_with_tools, messages)
 
     # print("\n[ORDER AGENT DEBUG]")
     # print("Tool calls:", response.tool_calls)
@@ -94,10 +83,10 @@ def order_agent_node(state: MessagesState):
 
 
 # 5. Build Graph
-builder = StateGraph(MessagesState)
+builder = StateGraph(SupportState)
 
 builder.add_node("order_agent", order_agent_node)
-builder.add_node("tools", ToolNode(order_tools))
+builder.add_node("tools", ToolNode(order_tools, handle_tool_errors=TOOL_ERROR_MESSAGE))
 
 builder.add_edge(START, "order_agent")
 

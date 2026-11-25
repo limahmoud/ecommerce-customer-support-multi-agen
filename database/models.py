@@ -1,5 +1,4 @@
-
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import uuid
 
@@ -10,7 +9,9 @@ from sqlalchemy import (
     Numeric,
     Integer,
     Text,
-    Uuid
+    Uuid,
+    Boolean,
+    JSON
 
 )
 
@@ -55,7 +56,7 @@ class Customer(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
 
     orders: Mapped[list["Order"]] = relationship(
@@ -70,6 +71,63 @@ class Customer(Base):
     cascade="all, delete-orphan"
    )
 
+# =====================================
+# 9. AUDIT LOG
+# =====================================
+
+class AuditLog(Base):
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    actor_email: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    actor_role: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    entity_type: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    entity_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    old_value: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    new_value: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        nullable=False,
+    )
 
 # =====================================
 # 2. ORDERS
@@ -87,7 +145,7 @@ class Order(Base):
 
     order_date: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
 
     status: Mapped[str] = mapped_column(
@@ -109,7 +167,7 @@ class Order(Base):
     )
 
     shipments: Mapped[list["Shipment"]] = relationship(
-    back_populates="order"
+        back_populates="order"
     )
 
     returns: Mapped[list["Return"]] = relationship(
@@ -221,7 +279,7 @@ class Return(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
 
     order: Mapped["Order"] = relationship(
@@ -263,7 +321,7 @@ class SupportTicket(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
 
     customer: Mapped["Customer"] = relationship(
@@ -301,22 +359,71 @@ class Conversation(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         nullable=False
     )
 
     last_opened_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         nullable=False
     )
 
     last_message_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
         nullable=False
     )
 
     customer: Mapped["Customer"] = relationship(
         back_populates="conversations"
+    )
+
+
+# =====================================
+# 8. USERS (AUTHENTICATION)
+# =====================================
+
+class User(Base):
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False
+    )
+
+    hashed_password: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(50),
+        default="customer",
+        nullable=False
+    )
+
+    customer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        nullable=False
     )

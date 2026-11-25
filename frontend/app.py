@@ -15,14 +15,18 @@ API_BASE_URL = os.getenv(
     "http://127.0.0.1:8000",
 ).rstrip("/")
 
-CUSTOMER_ID = 1
+
 
 CHAT_ENDPOINT = f"{API_BASE_URL}/chat"
+APPROVALS_ENDPOINT = f"{API_BASE_URL}/approvals"
 APPROVAL_ENDPOINT = f"{API_BASE_URL}/approval"
 HEALTH_ENDPOINT = f"{API_BASE_URL}/health"
 CONVERSATIONS_ENDPOINT = f"{API_BASE_URL}/conversations"
-
-
+LOGIN_ENDPOINT = f"{API_BASE_URL}/auth/login"
+ME_ENDPOINT = f"{API_BASE_URL}/auth/me"
+ORDERS_ENDPOINT = f"{API_BASE_URL}/orders"
+RETURNS_ENDPOINT = f"{API_BASE_URL}/returns"
+STAFF_RETURNS_ENDPOINT = f"{API_BASE_URL}/staff/returns"
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
@@ -53,6 +57,124 @@ if "conversations" not in st.session_state:
 if "initialization_done" not in st.session_state:
     st.session_state.initialization_done = False
 
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
+
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+
+
+# ==========================================
+# AUTHENTICATION FUNCTIONS
+# ==========================================
+
+def get_auth_headers():
+    token = st.session_state.access_token
+
+    return {
+        "Authorization": f"Bearer {token}"
+    }
+
+
+def login_user(email: str, password: str):
+    response = requests.post(
+        LOGIN_ENDPOINT,
+        data={
+            "username": email,
+            "password": password,
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    st.session_state.access_token = response.json()["access_token"]
+
+
+def fetch_current_user():
+    response = requests.get(
+        ME_ENDPOINT,
+        headers=get_auth_headers(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    st.session_state.current_user = response.json()
+
+
+def logout_user():
+    st.session_state.access_token = None
+    st.session_state.current_user = None
+    st.session_state.conversation_id = None
+    st.session_state.messages = []
+    st.session_state.pending_approval = None
+    st.session_state.conversations = []
+    st.session_state.initialization_done = False
+
+
+# ==========================================
+# LOGIN SCREEN
+# ==========================================
+
+if not st.session_state.access_token:
+    st.title("Customer Support Login")
+
+    with st.form("login_form"):
+        email = st.text_input("Email")
+        password = st.text_input(
+            "Password",
+            type="password",
+        )
+
+        submitted = st.form_submit_button(
+            "Login",
+            use_container_width=True,
+        )
+
+    if submitted:
+        try:
+            login_user(email.strip(), password)
+            st.rerun()
+
+        except requests.HTTPError as error:
+            status_code = error.response.status_code
+
+            try:
+              detail = error.response.json().get("detail")
+            except ValueError:
+               detail = error.response.text
+
+            st.error(f"Login failed: HTTP {status_code}")
+            st.error(f"Details: {detail}")
+
+        except requests.ConnectionError:
+           st.error(
+                 "Cannot connect to FastAPI. "
+                 "Check whether the backend is running."
+         )
+
+        except requests.RequestException as error:
+            st.error(f"Request failed: {error}")
+
+    st.stop()
+
+
+# ==========================================
+# LOAD CURRENT USER
+# ==========================================
+
+if st.session_state.current_user is None:
+    try:
+        fetch_current_user()
+
+    except requests.RequestException:
+        logout_user()
+        st.error(
+            "Session expired. Please login again."
+        )
+        st.stop()
+
 
 # ==========================================
 # API FUNCTIONS
@@ -74,9 +196,11 @@ def check_api_health():
 
 
 def fetch_conversations():
+    customer_id = st.session_state.current_user["customer_id"]
 
     response = requests.get(
-        f"{CONVERSATIONS_ENDPOINT}/{CUSTOMER_ID}",
+        f"{CONVERSATIONS_ENDPOINT}/{customer_id}",
+        headers=get_auth_headers(),
         timeout=10,
     )
 
@@ -84,15 +208,87 @@ def fetch_conversations():
 
     return response.json().get("conversations", [])
 
+def fetch_orders():
+
+    response = requests.get(
+        ORDERS_ENDPOINT,
+        headers=get_auth_headers(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    return response.json().get("orders", [])
+
+
+def fetch_order_details(order_id):
+
+    response = requests.get(
+        f"{ORDERS_ENDPOINT}/{order_id}",
+        headers=get_auth_headers(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    return response.json().get("order")
+
+
+def fetch_returns():
+
+    response = requests.get(
+        RETURNS_ENDPOINT,
+        headers=get_auth_headers(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    return response.json().get("returns", [])
+
+def fetch_staff_returns():
+
+    response = requests.get(
+        STAFF_RETURNS_ENDPOINT,
+        headers=get_auth_headers(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    return response.json().get("returns", [])
+
+
+def update_staff_return_status(return_id, new_status):
+
+    response = requests.patch(
+        f"{RETURNS_ENDPOINT}/{return_id}/status",
+        json={"new_status": new_status},
+        headers=get_auth_headers(),
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+def fetch_approvals():
+
+    response = requests.get(
+        APPROVALS_ENDPOINT,
+        headers=get_auth_headers(),
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    return response.json().get("approvals", [])
 
 def create_new_conversation():
-
     response = requests.post(
         CONVERSATIONS_ENDPOINT,
-        json={
-            "customer_id": CUSTOMER_ID,
-            "title": "New Conversation",
-        },
+        json={"title": "New Conversation"},
+        headers=get_auth_headers(),
         timeout=10,
     )
 
@@ -100,14 +296,10 @@ def create_new_conversation():
 
     return response.json()["conversation"]
 
-
 def open_conversation(conversation_id):
-
     response = requests.get(
         f"{CONVERSATIONS_ENDPOINT}/{conversation_id}/messages",
-        params={
-            "customer_id": CUSTOMER_ID,
-        },
+        headers=get_auth_headers(),
         timeout=20,
     )
 
@@ -118,21 +310,19 @@ def open_conversation(conversation_id):
     st.session_state.conversation_id = conversation_id
     st.session_state.messages = data.get("messages", [])
     st.session_state.pending_approval = data.get("approval_request")
-
     st.session_state.conversations = fetch_conversations()
 
 
 def send_message(question):
-
     payload = {
         "question": question,
         "conversation_id": st.session_state.conversation_id,
-        "customer_id": CUSTOMER_ID,
     }
 
     response = requests.post(
         CHAT_ENDPOINT,
         json=payload,
+        headers=get_auth_headers(),
         timeout=180,
     )
 
@@ -141,11 +331,10 @@ def send_message(question):
     return response.json()
 
 
-def submit_approval(approved, reason=""):
+def submit_approval(conversation_id, approved, reason=""):
 
     payload = {
-        "conversation_id": st.session_state.conversation_id,
-        "customer_id": CUSTOMER_ID,
+        "conversation_id": conversation_id,
         "approved": approved,
         "reason": reason,
     }
@@ -153,13 +342,13 @@ def submit_approval(approved, reason=""):
     response = requests.post(
         APPROVAL_ENDPOINT,
         json=payload,
+        headers=get_auth_headers(),
         timeout=180,
     )
 
     response.raise_for_status()
 
     return response.json()
-
 
 # ==========================================
 # RESPONSE HANDLING
@@ -194,38 +383,49 @@ def handle_api_response(data):
         })
 
 
+
 # ==========================================
 # INITIALIZE FIRST CONVERSATION
 # ==========================================
 
+user_role = st.session_state.current_user["role"]
+
+is_customer = user_role == "customer"
+
+is_staff = user_role in {
+    "support_agent",
+    "returns_agent",
+    "admin",
+}
+
 if not st.session_state.initialization_done:
 
-    try:
+    if is_customer:
 
-        conversations = fetch_conversations()
+        try:
+            conversations = fetch_conversations()
 
-        if conversations:
+            if conversations:
+                open_conversation(conversations[0]["id"])
 
-            # Open the most recently active conversation
-            open_conversation(conversations[0]["id"])
+            else:
+                conversation = create_new_conversation()
 
-        else:
+                st.session_state.conversation_id = conversation["id"]
+                st.session_state.messages = []
 
-            conversation = create_new_conversation()
+                st.session_state.conversations = fetch_conversations()
 
-            st.session_state.conversation_id = conversation["id"]
-            st.session_state.messages = []
+        except requests.RequestException:
+            st.error(
+                "Unable to initialize conversations. "
+                "Please check that the backend is running."
+            )
+            st.stop()
 
-            st.session_state.conversations = fetch_conversations()
+    st.session_state.initialization_done = True
 
-        st.session_state.initialization_done = True
 
-    except requests.RequestException:
-        st.error(
-            "Unable to initialize conversations. "
-            "Please check that the backend is running."
-        )
-        st.stop()
 
 
 # ==========================================
@@ -238,89 +438,433 @@ with st.sidebar:
 
     st.caption("Designed & Developed by Ali Mahmoud EL BAgoury")
 
+    # Logout Button
+    if st.button("Logout", use_container_width=True):
+        logout_user()
+        st.rerun()
+
     st.divider()
 
     if not check_api_health():
-
         st.error("Support system is currently unavailable.")
         st.stop()
 
-    st.subheader("Conversations")
+    # Navigation based on user role
+    if is_customer:
+        navigation_pages = ["Chat", "Orders", "Returns"]
 
-    if st.button(
-        "➕ New Conversation",
-        use_container_width=True,
-        type="primary",
-    ):
+    elif user_role == "support_agent":
+        navigation_pages = ["Approvals"]
 
-        try:
+    elif user_role in {"returns_agent", "admin"}:
+         navigation_pages = ["Approvals", "Returns Review"]
 
-            conversation = create_new_conversation()
+    else:
+        st.error("Your account role is not supported.")
+        st.stop()
 
-            st.session_state.conversation_id = conversation["id"]
-            st.session_state.messages = []
-            st.session_state.pending_approval = None
-
-            st.session_state.conversations = fetch_conversations()
-
-            st.rerun()
-
-        except requests.RequestException as error:
-
-            st.error(f"Could not create conversation: {error}")
+    selected_page = st.radio(
+        "Navigation",
+        navigation_pages,
+        key="selected_page",
+    )
 
     st.divider()
 
-    # Refresh conversation list
-    try:
+    # Customer conversations only
+    if is_customer:
 
-        st.session_state.conversations = fetch_conversations()
-
-    except requests.RequestException:
-
-        st.warning("Could not load conversation history.")
-
-    for conversation in st.session_state.conversations:
-
-        conversation_id = conversation["id"]
-
-        title = conversation["title"]
-
-        last_opened = conversation.get("last_opened_at", "")
-
-        if last_opened:
-            last_opened = last_opened.replace("T", " ")[:16]
-        else:
-            last_opened = "Unknown"
-
-        is_active = (
-            conversation_id == st.session_state.conversation_id
-        )
+        st.subheader("Conversations")
 
         if st.button(
-            f"{'📍 ' if is_active else '💬 '}{title}\n🕒 {last_opened}",
-            key=f"conversation_{conversation_id}",
+            "➕ New Conversation",
             use_container_width=True,
-            type="primary" if is_active else "secondary",
+            type="primary",
         ):
 
-            if not is_active:
+            try:
+                conversation = create_new_conversation()
 
-                try:
+                st.session_state.conversation_id = conversation["id"]
+                st.session_state.messages = []
+                st.session_state.pending_approval = None
 
-                    open_conversation(conversation_id)
+                st.session_state.conversations = fetch_conversations()
 
-                    st.rerun()
+                st.rerun()
 
-                except requests.RequestException as error:
+            except requests.RequestException as error:
+                st.error(f"Could not create conversation: {error}")
 
-                    st.error(
-                        f"Could not open conversation: {error}"
-                    )
+        st.divider()
+
+        # Refresh conversation list
+        try:
+            st.session_state.conversations = fetch_conversations()
+
+        except requests.RequestException:
+            st.warning("Could not load conversation history.")
+
+        for conversation in st.session_state.conversations:
+
+            conversation_id = conversation["id"]
+            title = conversation["title"]
+
+            last_opened = conversation.get("last_opened_at", "")
+
+            if last_opened:
+                last_opened = last_opened.replace("T", " ")[:16]
+            else:
+                last_opened = "Unknown"
+
+            is_active = (
+                conversation_id == st.session_state.conversation_id
+            )
+
+            if st.button(
+                f"{'📍 ' if is_active else '💬 '}{title}\n🕒 {last_opened}",
+                key=f"conversation_{conversation_id}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+
+                if not is_active:
+                    try:
+                        open_conversation(conversation_id)
+                        st.rerun()
+
+                    except requests.RequestException as error:
+                        st.error(f"Could not open conversation: {error}")
 
     st.divider()
 
     st.caption("Powered by LangGraph, LangChain and Ollama")
+
+
+
+# ==========================================
+# APPROVALS PAGE
+# ==========================================
+
+if selected_page == "Approvals":
+
+    st.title("Pending Approvals")
+
+    try:
+
+        approvals = fetch_approvals()
+
+        if not approvals:
+
+            st.info("There are no pending approvals.")
+
+        else:
+
+            st.write(f"Total Pending Approvals: {len(approvals)}")
+
+            for approval in approvals:
+
+                conversation_id = approval["conversation_id"]
+
+                with st.container(border=True):
+
+                    st.subheader( "Approval Request")
+
+                    st.write(
+                        f"**Customer ID:** {approval.get('customer_id')}"
+                    )
+
+                    st.write(
+                        f"**Action:** {approval.get('action', 'Unknown')}"
+                    )
+
+                    st.write(
+                        f"**Details:** {approval.get('details', '')}"
+                    )
+
+                    st.write(
+                        f"**Reason:** {approval.get('reason', '')}"
+                    )
+
+                    rejection_reason = st.text_input(
+                        "Rejection reason",
+                        key=f"approval_reason_{conversation_id}",
+                    )
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+
+                        if st.button(
+                            "Approve",
+                            key=f"approve_{conversation_id}",
+                            use_container_width=True,
+                            type="primary",
+                        ):
+
+                            try:
+
+                                submit_approval(
+                                    conversation_id=conversation_id,
+                                    approved=True,
+                                )
+
+                                st.rerun()
+
+                            except requests.RequestException as error:
+
+                                st.error(
+                                    f"Approval failed: {error}"
+                                )
+
+                    with col2:
+
+                        if st.button(
+                            "Reject",
+                            key=f"reject_{conversation_id}",
+                            use_container_width=True,
+                        ):
+
+                            try:
+
+                                submit_approval(
+                                    conversation_id=conversation_id,
+                                    approved=False,
+                                    reason=rejection_reason,
+                                )
+
+                                st.rerun()
+
+                            except requests.RequestException as error:
+
+                                st.error(
+                                    f"Rejection failed: {error}"
+                                )
+
+    except requests.RequestException as error:
+
+        st.error(f"Could not load pending approvals: {error}")
+
+    st.stop()
+
+
+
+# ==========================================
+# RETURNS REVIEW PAGE
+# ==========================================
+
+if selected_page == "Returns Review":
+
+    st.title("Returns Review")
+
+    try:
+
+        returns = fetch_staff_returns()
+
+        if not returns:
+
+            st.info("There are no return requests.")
+
+        else:
+
+            st.write(f"Total Return Requests: {len(returns)}")
+
+            for returned in returns:
+
+                return_id = returned["return_id"]
+
+                with st.container(border=True):
+
+                    st.subheader(f"Return #{return_id}")
+
+                    st.write(f"**Order ID:** {returned['order_id']}")
+                    st.write(f"**Reason:** {returned['reason']}")
+                    st.write(f"**Return Status:** {returned['status']}")
+                    st.write(
+                        f"**Refund Status:** {returned['refund_status']}"
+                    )
+                    st.write(
+                        f"**Created At:** {returned['created_at']}"
+                    )
+
+                    if returned["status"] == "pending":
+
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+
+                            if st.button(
+                                "Approve Return",
+                                key=f"approve_return_{return_id}",
+                                use_container_width=True,
+                                type="primary",
+                            ):
+
+                                try:
+
+                                    update_staff_return_status(
+                                        return_id,
+                                        "approved",
+                                    )
+
+                                    st.success(
+                                        f"Return #{return_id} approved."
+                                    )
+
+                                    st.rerun()
+
+                                except requests.RequestException as error:
+
+                                    st.error(
+                                        f"Approval failed: {error}"
+                                    )
+
+                        with col2:
+
+                            if st.button(
+                                "Reject Return",
+                                key=f"reject_return_{return_id}",
+                                use_container_width=True,
+                            ):
+
+                                try:
+
+                                    update_staff_return_status(
+                                        return_id,
+                                        "rejected",
+                                    )
+
+                                    st.success(
+                                        f"Return #{return_id} rejected."
+                                    )
+
+                                    st.rerun()
+
+                                except requests.RequestException as error:
+
+                                    st.error(
+                                        f"Rejection failed: {error}"
+                                    )
+
+                    else:
+
+                        st.info("This return has already been reviewed.")
+
+    except requests.RequestException as error:
+
+        st.error(f"Could not load return requests: {error}")
+
+    st.stop()
+
+
+
+# ==========================================
+# ORDERS PAGE
+# ==========================================
+
+if selected_page == "Orders":
+
+    st.title("My Orders")
+
+    try:
+
+        orders = fetch_orders()
+
+        if not orders:
+
+            st.info("You don't have any orders yet.")
+
+        else:
+
+            selected_order = st.selectbox(
+                "Select an order",
+                orders,
+                format_func=lambda order: (
+                    f"Order #{order['order_id']} - "
+                    f"{order['status']}"
+                ),
+            )
+
+            if selected_order:
+
+                order_id = selected_order["order_id"]
+
+                order_data = fetch_order_details(order_id)
+
+                if order_data:
+
+                    st.subheader(f"Order #{order_id}")
+
+                    st.write(
+                        f"**Date:** {order_data['order_date']}"
+                    )
+
+                    st.write(
+                        f"**Status:** {order_data['status']}"
+                    )
+
+                    st.write(
+                        f"**Total:** {order_data['total_amount']}"
+                    )
+
+                    st.divider()
+
+                    st.subheader("Order Items")
+
+                    if order_data["items"]:
+                        st.table(order_data["items"])
+                    else:
+                        st.info("No items found.")
+
+                    st.subheader("Shipments")
+
+                    if order_data["shipments"]:
+                        st.table(order_data["shipments"])
+                    else:
+                        st.info("No shipment information available.")
+
+                    st.subheader("Returns")
+
+                    if order_data["returns"]:
+                        st.table(order_data["returns"])
+                    else:
+                        st.info("No returns for this order.")
+
+    except requests.RequestException as error:
+
+        st.error(f"Could not load orders: {error}")
+
+    st.stop()
+
+
+# ==========================================
+# RETURNS PAGE
+# ==========================================
+
+if selected_page == "Returns":
+
+    st.title("My Returns")
+
+    try:
+
+        returns = fetch_returns()
+
+        if not returns:
+
+            st.info("You don't have any returns yet.")
+
+        else:
+
+            st.write(f"Total Returns: {len(returns)}")
+
+            st.table(returns)
+
+    except requests.RequestException as error:
+
+        st.error(f"Could not load returns: {error}")
+
+    st.stop()
+
 
 
 # ==========================================
@@ -335,91 +879,72 @@ st.divider()
 
 
 # ==========================================
-# DISPLAY CHAT HISTORY
+# CUSTOMER CHAT WITH AUTO REFRESH
 # ==========================================
 
-for message in st.session_state.messages:
+@st.fragment(run_every="5s")
+def customer_chat():
 
-    with st.chat_message(message["role"]):
+    conversation_id = st.session_state.conversation_id
 
-        st.markdown(message["content"])
+    # Refresh messages and approval status
+    if conversation_id:
 
+        try:
+            response = requests.get(
+                f"{CONVERSATIONS_ENDPOINT}/{conversation_id}/messages",
+                headers=get_auth_headers(),
+                timeout=10,
+            )
 
-# ==========================================
-# HUMAN APPROVAL
-# ==========================================
+            response.raise_for_status()
 
-pending = st.session_state.pending_approval
+            data = response.json()
 
-if pending:
+            st.session_state.messages = data.get("messages", [])
 
-    st.warning("Human Approval Required")
+            st.session_state.pending_approval = data.get(
+                "approval_request"
+            )
 
-    action = pending.get("action", "Unknown action")
-    order_id = pending.get("order_id")
-    return_id = pending.get("return_id")
-    details = pending.get("details", "")
-    reason = pending.get("reason", "")
+        except requests.RequestException:
+            st.warning("Unable to refresh conversation messages.")
 
-    with st.container(border=True):
+    # Display chat history
+    for message in st.session_state.messages:
 
-        st.subheader("Approval Request")
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-        st.write(f"**Action:** {action}")
+    # Pending approval status
+    pending = st.session_state.pending_approval
 
-        if order_id is not None:
-            st.write(f"**Order ID:** {order_id}")
+    if pending:
 
-        if return_id is not None:
-            st.write(f"**Return ID:** {return_id}")
-
-        st.write(f"**Details:** {details}")
-        st.write(f"**Reason:** {reason}")
-
-        st.divider()
-
-        rejection_reason = st.text_input(
-            "Rejection reason (optional)",
-            key="rejection_reason",
+        st.info(
+            "You can continue once an authorized team member "
+            "has reviewed your request."
         )
 
-        col1, col2 = st.columns(2)
+    # Chat input
+    if st.session_state.pending_approval is None:
 
-        with col1:
+        question = st.chat_input(
+            "Type your message here..."
+        )
 
-            approve_clicked = st.button(
-                "✅ Approve",
-                type="primary",
-                use_container_width=True,
-                key="approve_action",
-            )
+        if question:
 
-        with col2:
-
-            reject_clicked = st.button(
-                "❌ Reject",
-                use_container_width=True,
-                key="reject_action",
-            )
-
-        if approve_clicked or reject_clicked:
-
-            approved = approve_clicked
-
-            final_reason = (
-                "Approved by human reviewer"
-                if approved
-                else rejection_reason.strip() or "Rejected by human reviewer"
-            )
+            st.session_state.messages.append({
+                "role": "user",
+                "content": question,
+            })
 
             try:
 
-                with st.spinner("Processing decision..."):
+                with st.spinner("Assistant is thinking..."):
 
-                    result = submit_approval(
-                        approved=approved,
-                        reason=final_reason,
-                    )
+                    result = send_message(question)
 
                 handle_api_response(result)
 
@@ -429,50 +954,16 @@ if pending:
 
             except requests.RequestException as error:
 
-                st.error(f"Could not submit approval: {error}")
+                st.error(
+                    f"Could not connect to the backend: {error}"
+                )
+
+    else:
+
+        st.info(
+            "Please approve or reject the pending action "
+            "before sending another message."
+        )
 
 
-# ==========================================
-# CHAT INPUT
-# ==========================================
-
-if st.session_state.pending_approval is None:
-
-    question = st.chat_input(
-        "Type your message here..."
-    )
-
-    if question:
-
-        st.session_state.messages.append({
-            "role": "user",
-            "content": question,
-        })
-
-        with st.chat_message("user"):
-            st.markdown(question)
-
-        try:
-
-            with st.spinner("Assistant is thinking..."):
-
-                result = send_message(question)
-
-            handle_api_response(result)
-
-            st.session_state.conversations = fetch_conversations()
-
-            st.rerun()
-
-        except requests.RequestException as error:
-
-            st.error(
-                f"Could not connect to the backend: {error}"
-            )
-
-else:
-
-    st.info(
-        "Please approve or reject the pending action "
-        "before sending another message."
-    )
+customer_chat()

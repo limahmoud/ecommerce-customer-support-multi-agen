@@ -1,5 +1,4 @@
-
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -110,21 +109,29 @@ def seed_database():
                     tracking_number="TRK-SEED-1001",
                     carrier="Aramex",
                     status="in_transit",
-                    estimated_delivery=datetime.utcnow() + timedelta(days=2),
+                    estimated_delivery=(
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        + timedelta(days=2)
+                    ),
                 ),
                 Shipment(
                     order=order1,
                     tracking_number="TRK-SEED-1002",
                     carrier="DHL",
                     status="preparing",
-                    estimated_delivery=datetime.utcnow() + timedelta(days=3),
+                    estimated_delivery=(
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                        + timedelta(days=3)
+                    ),
                 ),
                 Shipment(
                     order=order3,
                     tracking_number="TRK-SEED-1003",
                     carrier="FedEx",
                     status="delivered",
-                    estimated_delivery=datetime.utcnow(),
+                    estimated_delivery=(
+                        datetime.now(timezone.utc).replace(tzinfo=None)
+                    ),
                 ),
             ]
 

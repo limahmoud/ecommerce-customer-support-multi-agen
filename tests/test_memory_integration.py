@@ -39,7 +39,8 @@ def test_postgres_checkpointer_persists_conversation():
             {
                 "messages": [
                     HumanMessage(content=first_question)
-                ]
+                ],
+                "customer_id": 1,
             },
             config=config,
         )
@@ -85,7 +86,8 @@ def test_postgres_checkpointer_persists_conversation():
             {
                 "messages": [
                     HumanMessage(content=second_question)
-                ]
+                ],
+                "customer_id": 1,
             },
             config=config,
         )

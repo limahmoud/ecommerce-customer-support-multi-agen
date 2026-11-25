@@ -1,20 +1,27 @@
-
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from database.db import SessionLocal
-from database.models import Order, Shipment, Return
+from database.models import (
+    Base,
+    Customer,
+    Order,
+    Shipment,
+    Return,
+    User,
+    AuditLog,
+    Conversation,
+)
 
 import uuid
 
-from database.models import Conversation
+
 # =====================================================
 # 1. CONFIGURATION
 # =====================================================
 
-# الحالات المسموح بها للطلبات
 ORDER_TRANSITIONS = {
     "pending": ["confirmed", "cancelled"],
     "confirmed": ["processing", "cancelled"],
@@ -24,7 +31,6 @@ ORDER_TRANSITIONS = {
     "cancelled": [],
 }
 
-# الحالات المسموح بها للشحنات
 SHIPMENT_TRANSITIONS = {
     "pending": ["shipped", "cancelled"],
     "shipped": ["in_transit", "delayed", "delivered"],
@@ -34,7 +40,6 @@ SHIPMENT_TRANSITIONS = {
     "cancelled": [],
 }
 
-# الحالات المسموح بها للمرتجعات
 RETURN_STATUSES = {
     "pending",
     "approved",
@@ -43,7 +48,14 @@ RETURN_STATUSES = {
     "completed",
 }
 
-# انتقالات حالة استرداد الأموال
+RETURN_TRANSITIONS = {
+    "pending": ["approved", "rejected"],
+    "approved": ["received"],
+    "received": ["completed"],
+    "rejected": [],
+    "completed": [],
+}
+
 REFUND_TRANSITIONS = {
     "not_requested": ["pending"],
     "pending": ["processing", "rejected"],
@@ -53,20 +65,16 @@ REFUND_TRANSITIONS = {
     "completed": [],
 }
 
-# الأدوار المسموح لها بتغيير حالات الطلبات
 ORDER_UPDATE_ROLES = {
     "admin",
     "support_agent",
-    "order_agent",
 }
 
-# الأدوار المسموح لها بتحديث الشحنات
 SHIPPING_UPDATE_ROLES = {
     "admin",
     "shipping_agent",
 }
 
-# الأدوار المسموح لها بإنشاء المرتجعات
 RETURN_CREATE_ROLES = {
     "admin",
     "support_agent",
@@ -74,12 +82,15 @@ RETURN_CREATE_ROLES = {
     "customer",
 }
 
-# الأدوار المسموح لها بتحديث Refund
 REFUND_UPDATE_ROLES = {
     "admin",
     "support_agent",
     "returns_agent",
-    "finance_agent",
+}
+
+RETURN_UPDATE_ROLES = {
+    "admin",
+    "returns_agent",
 }
 
 
@@ -88,9 +99,7 @@ REFUND_UPDATE_ROLES = {
 # =====================================================
 
 def check_role(actor_role: str, allowed_roles: set):
-    """
-    Check whether the current actor has permission.
-    """
+    """Check whether the current actor has permission."""
 
     if actor_role not in allowed_roles:
         raise PermissionError(
@@ -99,9 +108,7 @@ def check_role(actor_role: str, allowed_roles: set):
 
 
 def get_order_for_update(db, order_id: int):
-    """
-    Get an order and lock its row during the transaction.
-    """
+    """Get an order and lock its row during the transaction."""
 
     statement = (
         select(Order)
@@ -123,26 +130,23 @@ def authorize_customer_access(
     customer_id: int | None = None,
 ):
     """
-    Staff roles can access orders.
-    Customers can access only their own orders.
+    If an operation is linked to a customer conversation,
+    every actor must operate on that customer's orders.
     """
 
-    if actor_role == "customer":
-        if customer_id is None:
-            raise PermissionError(
-                "Customer ID is required."
-            )
+    if customer_id is None:
+        if actor_role == "customer":
+            raise PermissionError("Customer ID is required.")
+        return
 
-        if order.customer_id != customer_id:
-            raise PermissionError(
-                "You are not allowed to access this order."
-            )
+    if order.customer_id != customer_id:
+        raise PermissionError(
+            "You are not allowed to access this customer's order."
+        )
 
 
 def commit_safely(db):
-    """
-    Commit changes or rollback if an error occurs.
-    """
+    """Commit changes or rollback if an error occurs."""
 
     try:
         db.commit()
@@ -160,11 +164,11 @@ def update_order_status(
     order_id: int,
     new_status: str,
     actor_role: str,
+    customer_id: int | None = None,
+    actor_user_id: int | None = None,
+    actor_email: str | None = None,
 ):
-    """
-    Update an order status after checking permissions
-    and allowed status transitions.
-    """
+    """Update an order status after checking permissions and transitions."""
 
     check_role(actor_role, ORDER_UPDATE_ROLES)
 
@@ -177,6 +181,12 @@ def update_order_status(
 
     try:
         order = get_order_for_update(db, order_id)
+
+        authorize_customer_access(
+            order=order,
+            actor_role=actor_role,
+            customer_id=customer_id,
+        )
 
         current_status = order.status.lower()
 
@@ -196,6 +206,25 @@ def update_order_status(
             )
 
         order.status = new_status
+
+        # Audit Admin changes in the same transaction.
+        if (
+            actor_role == "admin"
+            and actor_user_id is not None
+            and actor_email
+        ):
+            db.add(
+                AuditLog(
+                    actor_user_id=actor_user_id,
+                    actor_email=actor_email,
+                    actor_role=actor_role,
+                    action="update_order_status",
+                    entity_type="order",
+                    entity_id=str(order.id),
+                    old_value={"status": current_status},
+                    new_value={"status": new_status},
+                )
+            )
 
         commit_safely(db)
 
@@ -223,11 +252,10 @@ def update_shipment_status(
     shipment_id: int,
     new_status: str,
     actor_role: str,
+    actor_user_id: int | None = None,
+    actor_email: str | None = None,
 ):
-    """
-    Update shipment status after permission and
-    transition validation.
-    """
+    """Update shipment status after permission and transition validation."""
 
     check_role(actor_role, SHIPPING_UPDATE_ROLES)
 
@@ -271,6 +299,25 @@ def update_shipment_status(
 
         shipment.status = new_status
 
+        # Audit Admin changes in the same transaction.
+        if (
+            actor_role == "admin"
+            and actor_user_id is not None
+            and actor_email
+        ):
+            db.add(
+                AuditLog(
+                    actor_user_id=actor_user_id,
+                    actor_email=actor_email,
+                    actor_role=actor_role,
+                    action="update_shipment_status",
+                    entity_type="shipment",
+                    entity_id=str(shipment.id),
+                    old_value={"status": current_status},
+                    new_value={"status": new_status},
+                )
+            )
+
         commit_safely(db)
 
         return {
@@ -299,13 +346,10 @@ def create_return(
     reason: str,
     actor_role: str,
     customer_id: int | None = None,
+    actor_user_id: int | None = None,
+    actor_email: str | None = None,
 ):
-    """
-    Create a return request for a delivered order.
-
-    Customers can create returns only for their own orders.
-    Staff roles can create returns according to their permissions.
-    """
+    """Create a return request for a delivered order."""
 
     check_role(actor_role, RETURN_CREATE_ROLES)
 
@@ -325,7 +369,7 @@ def create_return(
             customer_id=customer_id,
         )
 
-        if order.status.lower() != "delivered":
+        if order.status.strip().lower() != "delivered":
             raise ValueError(
                 "A return can only be created for a delivered order."
             )
@@ -338,6 +382,31 @@ def create_return(
         )
 
         db.add(returned)
+        db.flush()
+
+        # Audit Admin return creation in the same transaction.
+        if (
+            actor_role == "admin"
+            and actor_user_id is not None
+            and actor_email
+        ):
+            db.add(
+                AuditLog(
+                    actor_user_id=actor_user_id,
+                    actor_email=actor_email,
+                    actor_role=actor_role,
+                    action="create_return",
+                    entity_type="return",
+                    entity_id=str(returned.id),
+                    old_value=None,
+                    new_value={
+                        "order_id": order.id,
+                        "reason": reason,
+                        "status": "pending",
+                        "refund_status": "not_requested",
+                    },
+                )
+            )
 
         commit_safely(db)
         db.refresh(returned)
@@ -360,7 +429,201 @@ def create_return(
         db.close()
 
 
+def update_return_status(
+    return_id: int,
+    new_status: str,
+    actor_role: str,
+    customer_id: int | None = None,
+    actor_user_id: int | None = None,
+    actor_email: str | None = None,
+):
+    """Update return status after checking permissions and transitions."""
+
+    check_role(actor_role, RETURN_UPDATE_ROLES)
+
+    new_status = new_status.strip().lower()
+
+    if new_status not in RETURN_STATUSES:
+        raise ValueError(f"Invalid return status: {new_status}")
+
+    db = SessionLocal()
+
+    try:
+        statement = (
+            select(Return)
+            .where(Return.id == return_id)
+            .with_for_update()
+        )
+
+        returned = db.scalar(statement)
+
+        if not returned:
+            raise ValueError(f"Return {return_id} was not found.")
+
+        order_statement = (
+            select(Order)
+            .where(Order.id == returned.order_id)
+            .with_for_update()
+        )
+
+        order = db.scalar(order_statement)
+
+        if not order:
+            raise ValueError(
+                f"Order {returned.order_id} was not found."
+            )
+
+        authorize_customer_access(
+            order=order,
+            actor_role=actor_role,
+            customer_id=customer_id,
+        )
+
+        current_status = returned.status.strip().lower()
+
+        allowed_next_statuses = RETURN_TRANSITIONS.get(
+            current_status
+        )
+
+        if allowed_next_statuses is None:
+            raise ValueError(
+                f"Unknown current return status: {current_status}"
+            )
+
+        if new_status not in allowed_next_statuses:
+            raise ValueError(
+                f"Cannot change return status "
+                f"from '{current_status}' to '{new_status}'."
+            )
+
+        returned.status = new_status
+
+        # Audit Admin changes in the same transaction.
+        if (
+            actor_role == "admin"
+            and actor_user_id is not None
+            and actor_email
+        ):
+            db.add(
+                AuditLog(
+                    actor_user_id=actor_user_id,
+                    actor_email=actor_email,
+                    actor_role=actor_role,
+                    action="update_return_status",
+                    entity_type="return",
+                    entity_id=str(returned.id),
+                    old_value={"status": current_status},
+                    new_value={"status": new_status},
+                )
+            )
+
+        commit_safely(db)
+        db.refresh(returned)
+
+        return {
+            "success": True,
+            "message": "Return status updated successfully.",
+            "return_id": returned.id,
+            "order_id": returned.order_id,
+            "old_status": current_status,
+            "new_status": returned.status,
+            "refund_status": returned.refund_status,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
+
 # =====================================================
+def request_refund(
+    return_id: int,
+    customer_id: int,
+):
+    """Allow a customer to request a refund for their own approved return."""
+
+    if customer_id is None:
+        raise PermissionError("Customer authentication is required.")
+
+    db = SessionLocal()
+
+    try:
+        statement = (
+            select(Return)
+            .where(Return.id == return_id)
+            .with_for_update()
+        )
+
+        returned = db.scalar(statement)
+
+        if not returned:
+            raise ValueError(f"Return {return_id} was not found.")
+
+        order_statement = (
+            select(Order)
+            .where(Order.id == returned.order_id)
+            .with_for_update()
+        )
+
+        order = db.scalar(order_statement)
+
+        if not order:
+            raise ValueError(f"Order {returned.order_id} was not found.")
+
+        authorize_customer_access(
+            order=order,
+            actor_role="customer",
+            customer_id=customer_id,
+        )
+
+        if returned.status.strip().lower() not in {
+            "approved",
+            "received",
+            "completed",
+        }:
+            raise ValueError(
+                "Refund can only be requested after the return is approved."
+            )
+
+        current_status = returned.refund_status.strip().lower()
+
+        if current_status == "pending":
+            return {
+                "success": True,
+                "message": "Refund request is already pending approval.",
+                "return_id": returned.id,
+                "old_status": "pending",
+                "new_status": "pending",
+            }
+
+        if current_status != "not_requested":
+            raise ValueError(
+                f"Cannot request a refund when its status is '{current_status}'."
+            )
+
+        returned.refund_status = "pending"
+
+        commit_safely(db)
+
+        return {
+            "success": True,
+            "message": "Refund request submitted and is pending approval.",
+            "return_id": returned.id,
+            "old_status": current_status,
+            "new_status": returned.refund_status,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
+
 # 6. UPDATE REFUND STATUS
 # =====================================================
 
@@ -368,11 +631,11 @@ def update_refund_status(
     return_id: int,
     new_refund_status: str,
     actor_role: str,
+    customer_id: int | None = None,
+    actor_user_id: int | None = None,
+    actor_email: str | None = None,
 ):
-    """
-    Update refund status after checking permissions
-    and business rules.
-    """
+    """Update refund status after checking permissions and business rules."""
 
     check_role(actor_role, REFUND_UPDATE_ROLES)
 
@@ -396,6 +659,25 @@ def update_refund_status(
             raise ValueError(
                 f"Return {return_id} was not found."
             )
+
+        order_statement = (
+            select(Order)
+            .where(Order.id == returned.order_id)
+            .with_for_update()
+        )
+
+        order = db.scalar(order_statement)
+
+        if not order:
+            raise ValueError(
+                f"Order {returned.order_id} was not found."
+            )
+
+        authorize_customer_access(
+            order=order,
+            actor_role=actor_role,
+            customer_id=customer_id,
+        )
 
         if returned.status.lower() not in {
             "approved",
@@ -425,6 +707,25 @@ def update_refund_status(
             )
 
         returned.refund_status = new_refund_status
+
+        # Audit Admin changes in the same transaction.
+        if (
+            actor_role == "admin"
+            and actor_user_id is not None
+            and actor_email
+        ):
+            db.add(
+                AuditLog(
+                    actor_user_id=actor_user_id,
+                    actor_email=actor_email,
+                    actor_role=actor_role,
+                    action="update_refund_status",
+                    entity_type="return",
+                    entity_id=str(returned.id),
+                    old_value={"refund_status": current_status},
+                    new_value={"refund_status": new_refund_status},
+                )
+            )
 
         commit_safely(db)
 
@@ -501,8 +802,10 @@ if __name__ == "__main__":
 
     except (ValueError, PermissionError) as error:
         print("Error:", error)
+
+
 # =====================================================
-# CONVERSATION OPERATIONS
+# 8. CONVERSATION OPERATIONS
 # =====================================================
 
 def create_conversation(
@@ -632,7 +935,11 @@ def update_conversation_last_opened(
         if not conversation:
             return False
 
-        conversation.last_opened_at = datetime.utcnow()
+        # Updated: timezone-aware UTC converted to naive UTC
+        # to remain compatible with existing DateTime columns.
+        conversation.last_opened_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+        )
 
         db.commit()
 
@@ -671,7 +978,11 @@ def update_conversation_last_message(
         if not conversation:
             return False
 
-        conversation.last_message_at = datetime.utcnow()
+        # Updated: timezone-aware UTC converted to naive UTC
+        # to remain compatible with existing DateTime columns.
+        conversation.last_message_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+        )
 
         if title:
             conversation.title = title[:200]
